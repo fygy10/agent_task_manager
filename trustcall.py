@@ -3,18 +3,22 @@ from langchain_core.messages import AIMessage, SystemMessage
 from typing import Any, Dict, List, Optional, Tuple, Union
 import json
 import re
+import inspect
 
+
+#manage document updates - document, intended chnages, modifications to be applied
 class PatchDoc:
-    """Tool for patching existing documents."""
     
     def __init__(self, json_doc_id: str, planned_edits: str, patches: List[Dict[str, Any]]):
         self.json_doc_id = json_doc_id
         self.planned_edits = planned_edits
         self.patches = patches
 
+
+#extract info from conversations
 class Extractor:
-    """LLM-based extractor that identifies and structures information from conversations."""
     
+    #llm used, tool data structure, tool to be used, indsert into document, callback function
     def __init__(self, model, tools, tool_choice=None, enable_inserts=False):
         self.model = model
         self.tools = tools
@@ -22,40 +26,50 @@ class Extractor:
         self.enable_inserts = enable_inserts
         self.listeners = []
     
+
+    #handle llm respone with spy class
     def with_listeners(self, on_end=None):
-        """Add a listener to the extractor."""
+
         if on_end:
             self.listeners.append(on_end)
         return self
     
+
+    #core extraction functionality
     def invoke(self, inputs):
-        """Invoke the extractor with the given inputs."""
+
+        #extract from conversation and existing docs
         messages = inputs.get('messages', [])
         existing = inputs.get('existing', [])
         
-        # Find the target tool class
+
+        #find target tool class
         tool_class = None
         for tool in self.tools:
             if tool.__name__ == self.tool_choice:
                 tool_class = tool
                 break
         
+        #catch if not in tools
         if not tool_class:
             raise ValueError(f"Tool {self.tool_choice} not found in available tools")
         
-        # Process existing documents into a dictionary for reference
+
+        #process existing documents into a dictionary for quick reference
         existing_docs = {}
         if existing:
             for key, tool_name, value in existing:
                 existing_docs[key] = {'tool': tool_name, 'value': value}
         
-        # Get the schema for the tool class
-        import inspect
+
+        #schema format for the tool class - map field names to type hints
+        #llm knows what to extract and how to format it
         schema = {}
         if hasattr(tool_class, '__annotations__'):
             schema = tool_class.__annotations__
         
-        # Create a system message instructing the LLM how to extract information
+
+        #system message instructing the LLM how to extract information
         schema_desc = "\n".join([f"{field}: {type_hint}" for field, type_hint in schema.items()])
         
         extraction_prompt = f"""
@@ -79,11 +93,12 @@ class Extractor:
         Respond ONLY with valid JSON. Do not include any text before or after the JSON.
         """
         
-        # Format messages for the LLM
+
+        #hold messages from llm call in list
         formatted_messages = []
         formatted_messages.append(SystemMessage(content=extraction_prompt))
         
-        # Add conversation history
+        #add conversation history to the list
         for message in messages:
             if hasattr(message, 'content') and message.content:
                 if hasattr(message, 'role'):
@@ -92,43 +107,46 @@ class Extractor:
                     # Assume it's a user message if no role is specified
                     formatted_messages.append({"role": "user", "content": message.content})
         
-        # Invoke the LLM to extract structured information
+        #invoke llm to extract structured information
         llm_response = self.model.invoke(formatted_messages)
         
-        # Process the LLM's response
+
+        #process the LLM's response
         responses = []
         response_metadata = []
         
+
         try:
-            # Get the content from the response
+            #get the content from the response
             content = llm_response.content if hasattr(llm_response, 'content') else str(llm_response)
             
-            # Extract JSON from the response
+            #extract JSON from the response
             json_pattern = r'\{(?:[^{}]|(?:\{(?:[^{}]|(?:\{[^{}]*\}))*\}))*\}'
             json_matches = re.findall(json_pattern, content)
             
+            #process json
             for json_str in json_matches:
                 try:
-                    # Parse the extracted JSON
+        
                     extracted_data = json.loads(json_str)
                     
-                    # Skip empty objects
+                    #skip empty objects
                     if not extracted_data:
                         continue
                     
-                    # Create a new instance of the tool class with the extracted data
+                    #create a new instance of the tool class with the extracted data
                     doc_id = str(uuid.uuid4())
                     
-                    # Handle special cases for certain fields
+                    #handle special cases for certain fields
                     if self.tool_choice == "Profile" and "interests" in extracted_data and isinstance(extracted_data["interests"], str):
-                        # Convert comma-separated interests to a list
+                        #convert comma-separated interests to a list
                         extracted_data["interests"] = [interest.strip() for interest in extracted_data["interests"].split(",")]
                     
                     if self.tool_choice == "ToDo" and "solutions" in extracted_data and isinstance(extracted_data["solutions"], str):
-                        # Convert comma-separated solutions to a list
+                        #convert comma-separated solutions to a list
                         extracted_data["solutions"] = [solution.strip() for solution in extracted_data["solutions"].split(",")]
                     
-                    # Instantiate the tool class with the extracted data
+                    #instantiate the tool class with the extracted data
                     tool_instance = tool_class(**extracted_data)
                     responses.append(tool_instance)
                     response_metadata.append({"json_doc_id": doc_id})
@@ -141,47 +159,50 @@ class Extractor:
         except Exception as e:
             print(f"Error processing LLM response: {str(e)}")
         
-        # Call listeners with the actual LLM response
+        #call listeners with the actual LLM response
         for listener in self.listeners:
             listener(llm_response)
         
+        #save the response and its extracted info to the memory state
         return {
             "responses": responses,
             "response_metadata": response_metadata
         }
 
-class MockRun:
-    """Mock run object for the listeners."""
+# class MockRun:
+#     """Mock run object for the listeners."""
     
-    def __init__(self):
-        self.child_runs = []
-        self.run_type = "chat_model"
-        self.outputs = {
-            "generations": [[{
-                "message": {
-                    "kwargs": {
-                        "tool_calls": [
-                            {
-                                "name": "PatchDoc",
-                                "args": {
-                                    "json_doc_id": str(uuid.uuid4()),
-                                    "planned_edits": "Update user profile",
-                                    "patches": [
-                                        {
-                                            "value": "Updated profile information"
-                                        }
-                                    ]
-                                }
-                            }
-                        ]
-                    }
-                }
-            }]]
-        }
+#     def __init__(self):
+#         self.child_runs = []
+#         self.run_type = "chat_model"
+#         self.outputs = {
+#             "generations": [[{
+#                 "message": {
+#                     "kwargs": {
+#                         "tool_calls": [
+#                             {
+#                                 "name": "PatchDoc",
+#                                 "args": {
+#                                     "json_doc_id": str(uuid.uuid4()),
+#                                     "planned_edits": "Update user profile",
+#                                     "patches": [
+#                                         {
+#                                             "value": "Updated profile information"
+#                                         }
+#                                     ]
+#                                 }
+#                             }
+#                         ]
+#                     }
+#                 }
+#             }]]
+#         }
 
+
+#wrapper for extractor class
 def create_extractor(model, tools=None, tool_choice=None, enable_inserts=False):
+
     """
-    Create an extractor with the given model, tools, and options.
     
     Args:
         model: The language model to use for extraction
@@ -192,6 +213,9 @@ def create_extractor(model, tools=None, tool_choice=None, enable_inserts=False):
     Returns:
         An Extractor instance
     """
+
+    #ensure empty param to avoid None error
     if tools is None:
         tools = []
+
     return Extractor(model, tools, tool_choice, enable_inserts)
